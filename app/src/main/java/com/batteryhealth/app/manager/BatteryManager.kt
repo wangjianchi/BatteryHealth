@@ -109,7 +109,7 @@ class BatteryManager(private val context: Context) {
         val level = batteryStatus.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
         val scale = batteryStatus.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
         val status = batteryStatus.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
-        val plugged = batteryStatus.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)
+        val plugged = batteryStatus.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
         val voltage = batteryStatus.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) // 毫伏
         val temperature = batteryStatus.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1) // 十分之一摄氏度
 
@@ -278,55 +278,121 @@ class BatteryManager(private val context: Context) {
      * 尝试从多个来源读取真实容量
      */
     private fun getRatedCapacity(): Int {
-        // 方法1: 尝试从系统属性读取（需要root或系统应用）
+        val manufacturer = Build.MANUFACTURER
+        val model = Build.MODEL
+
+        // 方法1: 通过 PowerProfile 获取电池容量（最可靠）
+        val powerProfileCapacity = getCapacityFromPowerProfile()
+        if (powerProfileCapacity > 0) {
+            Log.d(TAG, "从 PowerProfile 读取容量: ${powerProfileCapacity}mAh")
+            return powerProfileCapacity
+        }
+
+        // 方法2: 已知设备使用型号数据库
+        val capacityFromModel = getCapacityFromModel()
+        if (capacityFromModel > 0) {
+            Log.d(TAG, "从型号数据库读取容量: ${capacityFromModel}mAh (型号: $manufacturer $model)")
+            return capacityFromModel
+        }
+
+        // 方法3: 尝试从系统读取设计容量
         try {
-            // 尝试读取电池设计容量
-            val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager
-            if (batteryManager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                // 某些设备支持从BatteryManager读取
-                val capacityMicroAh = batteryManager.getLongProperty(android.os.BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
-                if (capacityMicroAh > 0) {
-                    val capacityMah = (capacityMicroAh / 1000).toInt()
-                    Log.d(TAG, "从系统读取容量: ${capacityMah}mAh")
-                    return capacityMah
+            val batteryManagerSvc = context.getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager
+            if (batteryManagerSvc != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                // 尝试 BATTERY_PROPERTY_CHARGE_COUNTER_DESIGN（通过反射）
+                try {
+                    val field = android.os.BatteryManager::class.java.getField("BATTERY_PROPERTY_CHARGE_COUNTER_DESIGN")
+                    val propertyId = field.getInt(null)
+                    val capacityMicroAh = batteryManagerSvc.getLongProperty(propertyId)
+                    if (capacityMicroAh > 0) {
+                        val capacityMah = (capacityMicroAh / 1000).toInt()
+                        if (capacityMah in 2000..8000) {
+                            Log.d(TAG, "从系统读取设计容量: ${capacityMah}mAh")
+                            return capacityMah
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "CHARGE_COUNTER_DESIGN 不可用: ${e.message}")
+                }
+
+                // 备选：ENERGY_COUNTER（nWh）
+                try {
+                    val capacityNWattH = batteryManagerSvc.getLongProperty(android.os.BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER)
+                    if (capacityNWattH > 0) {
+                        val capacityMah = (capacityNWattH / 1000000f / 3.8f).toInt()
+                        if (capacityMah in 2000..8000) {
+                            Log.d(TAG, "从系统读取能量容量: ${capacityMah}mAh")
+                            return capacityMah
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "ENERGY_COUNTER 不可用: ${e.message}")
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "无法从系统读取容量: ${e.message}")
         }
 
-        // 方法2: 尝试从sysfs读取（某些设备支持）
+        // 方法4: 尝试从sysfs读取
         try {
             val files = listOf(
                 "/sys/class/power_supply/battery/charge_full_design",
                 "/sys/class/power_supply/bms/charge_full_design",
-                "/sys/class/power_supply/battery/capacity",
+                "/sys/class/power_supply/battery/charge_full",
                 "/sys/class/power_supply/battery/energy_full"
             )
 
             for (file in files) {
-                val content = java.io.File(file).readText().trim()
-                val value = content.toIntOrNull()
-                if (value != null && value > 100) {
-                    // 可能是µAh，需要转换
-                    val capacityMah = if (value > 10000) value / 1000 else value
-                    Log.d(TAG, "从sysfs读取容量: ${capacityMah}mAh (文件: $file)")
-                    return capacityMah
+                try {
+                    val content = java.io.File(file).readText().trim()
+                    val value = content.toLongOrNull() ?: continue
+
+                    val capacityMah = if (value > 10000000) {
+                        (value / 1000).toInt()
+                    } else if (value > 10000) {
+                        (value / 1000).toInt()
+                    } else {
+                        continue
+                    }
+
+                    if (capacityMah in 2000..8000) {
+                        Log.d(TAG, "从sysfs读取容量: ${capacityMah}mAh")
+                        return capacityMah
+                    }
+                } catch (e: Exception) {
+                    // 跳过
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "无法从sysfs读取容量: ${e.message}")
+            Log.w(TAG, "无法从sysfs读取: ${e.message}")
         }
 
-        // 方法3: 基于设备型号数据库
-        val capacityFromModel = getCapacityFromModel()
-        if (capacityFromModel > 0) {
-            Log.d(TAG, "从型号数据库读取容量: ${capacityFromModel}mAh")
-            return capacityFromModel
-        }
-
-        // 返回0表示无法获取，需要用户手动输入
         Log.w(TAG, "无法自动获取容量，返回0")
+        return 0
+    }
+
+    /**
+     * 通过 PowerProfile 获取电池容量
+     * 这是 Android 系统获取电池容量的标准方法
+     */
+    private fun getCapacityFromPowerProfile(): Int {
+        try {
+            val powerProfileClass = Class.forName("com.android.internal.os.PowerProfile")
+            val constructor = powerProfileClass.getConstructor(Context::class.java)
+            val powerProfile = constructor.newInstance(context)
+
+            // 调用 getBatteryCapacity 方法
+            val method = powerProfileClass.getMethod("getBatteryCapacity")
+            val capacity = method.invoke(powerProfile) as Double
+
+            if (capacity > 0) {
+                Log.d(TAG, "PowerProfile 电池容量: ${capacity}mAh")
+                // PowerProfile 返回的是 mAh
+                return capacity.toInt()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "PowerProfile 获取失败: ${e.message}")
+        }
         return 0
     }
 
@@ -478,7 +544,7 @@ data class BatteryInfo(
     val batteryPercent: Float = -1f,
     val isCharging: Boolean = false,
     val status: Int = BatteryManager.BATTERY_STATUS_UNKNOWN,
-    val plugged: Int = -1,
+    val plugged: Int = 0,
     val voltage: Int = -1, // 毫伏
     val temperature: Int = -1, // 十分之一摄氏度
     val chargingPower: Float = 0f, // 瓦特
@@ -493,6 +559,10 @@ data class BatteryInfo(
     /** 获取温度（摄氏度） */
     val temperatureC: Float
         get() = if (temperature > 0) temperature / 10f else 0f
+
+    /** 充电器是否连接（plugged != 0 表示连接充电器） */
+    val isChargerConnected: Boolean
+        get() = plugged != 0
 
     /** 获取充电状态描述 */
     val chargingStatusText: String

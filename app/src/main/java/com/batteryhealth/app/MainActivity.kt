@@ -29,7 +29,6 @@ import com.batteryhealth.app.viewmodel.BatteryViewModel
 sealed class Screen(val route: String, val label: String, val icon: ImageVector) {
     object Home : Screen("home", "概览", Icons.Default.Home)
     object Monitor : Screen("monitor", "监测", Icons.Default.BatteryChargingFull)
-    object Record : Screen("record", "记录", Icons.Default.AddCircle)
     object History : Screen("history", "历史", Icons.Default.History)
     object Trend : Screen("trend", "趋势", Icons.Default.ShowChart)
 }
@@ -90,7 +89,7 @@ fun BatteryApp() {
     // 历史详情页面状态
     var selectedRecord by remember { mutableStateOf<com.batteryhealth.app.data.model.ChargingRecord?>(null) }
 
-    val screens = listOf(Screen.Home, Screen.Monitor, Screen.Record, Screen.History, Screen.Trend)
+    val screens = listOf(Screen.Home, Screen.Monitor, Screen.History, Screen.Trend)
 
     // 定时更新电池信息
     LaunchedEffect(Unit) {
@@ -115,7 +114,6 @@ fun BatteryApp() {
                                 when (currentScreen) {
                                     Screen.Home -> "电池健康检测"
                                     Screen.Monitor -> "充电监测"
-                                    Screen.Record -> "新建充电记录"
                                     Screen.History -> "充电历史"
                                     Screen.Trend -> "健康趋势"
                                 }
@@ -221,7 +219,6 @@ fun BatteryApp() {
                         viewModel.toggleAutoRecord(enabled)
                     }
                 )
-                Screen.Record -> RecordScreen(viewModel)
                 Screen.History -> HistoryScreen(
                     viewModel = viewModel,
                     onRecordClick = { record ->

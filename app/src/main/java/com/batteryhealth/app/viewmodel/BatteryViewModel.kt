@@ -238,38 +238,11 @@ class BatteryViewModel(application: Application) : AndroidViewModel(application)
      */
     private fun handleChargingSession(batteryInfo: BatteryInfo) {
         val currentState = _monitorState.value.sessionState
+        val isChargerConnected = batteryInfo.plugged != 0  // plugged != 0 表示充电器连接中
 
         when {
-            // 开始充电
-            batteryInfo.isCharging && currentState !is ChargingSessionState.Charging -> {
-                val startPercent = batteryInfo.batteryPercent
-                val ratedCapacity = batteryInfo.ratedCapacity
-
-                if (startPercent > 0 && ratedCapacity > 0) {
-                    val session = ChargingSession(
-                        startPercent = startPercent,
-                        ratedCapacity = ratedCapacity,
-                        currentPercent = startPercent
-                    )
-                    _monitorState.value = _monitorState.value.copy(
-                        sessionState = ChargingSessionState.Charging(session)
-                    )
-                }
-            }
-            // 正在充电，更新会话
-            batteryInfo.isCharging && currentState is ChargingSessionState.Charging -> {
-                val updatedSession = currentState.session.updateSession(
-                    currentPercent = batteryInfo.batteryPercent,
-                    currentPower = batteryInfo.chargingPower,
-                    voltage = batteryInfo.voltageV,
-                    temperature = batteryInfo.temperatureC
-                )
-                _monitorState.value = _monitorState.value.copy(
-                    sessionState = ChargingSessionState.Charging(updatedSession)
-                )
-            }
-            // 充电结束
-            !batteryInfo.isCharging && currentState is ChargingSessionState.Charging -> {
+            // 充电器已断开，结束充电会话
+            !isChargerConnected && currentState is ChargingSessionState.Charging -> {
                 val completedSession = currentState.session.endSession(batteryInfo.batteryPercent)
 
                 // 如果充电量超过5%，自动保存记录
@@ -285,9 +258,40 @@ class BatteryViewModel(application: Application) : AndroidViewModel(application)
                     sessionState = ChargingSessionState.Completed(completedSession)
                 )
             }
-            // 未充电状态
-            !batteryInfo.isCharging && currentState !is ChargingSessionState.Charging -> {
-                // 保持当前状态不变，避免清除已完成的会话
+            // 充电器已连接（plugged != 0），开始或继续充电会话
+            isChargerConnected -> {
+                when (currentState) {
+                    // 充电器连接且未满电，开启新会话
+                    is ChargingSessionState.NotCharging,
+                    is ChargingSessionState.Completed -> {
+                        if (batteryInfo.batteryPercent < 100f && batteryInfo.batteryPercent > 0f && batteryInfo.ratedCapacity > 0) {
+                            val session = ChargingSession(
+                                startPercent = batteryInfo.batteryPercent,
+                                ratedCapacity = batteryInfo.ratedCapacity,
+                                currentPercent = batteryInfo.batteryPercent
+                            )
+                            _monitorState.value = _monitorState.value.copy(
+                                sessionState = ChargingSessionState.Charging(session)
+                            )
+                        }
+                    }
+                    // 继续更新充电会话
+                    is ChargingSessionState.Charging -> {
+                        val updatedSession = currentState.session.updateSession(
+                            currentPercent = batteryInfo.batteryPercent,
+                            currentPower = batteryInfo.chargingPower,
+                            voltage = batteryInfo.voltageV,
+                            temperature = batteryInfo.temperatureC
+                        )
+                        _monitorState.value = _monitorState.value.copy(
+                            sessionState = ChargingSessionState.Charging(updatedSession)
+                        )
+                    }
+                }
+            }
+            // 充电器未连接且无充电会话，保持空闲状态
+            else -> {
+                // 保持 NotCharging 状态
             }
         }
     }

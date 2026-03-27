@@ -367,10 +367,14 @@ fun ChargingSessionCard(
     session: com.batteryhealth.app.data.model.ChargingSession,
     onEndCharging: () -> Unit
 ) {
+    val isFullyCharged = session.currentPercent >= 100f
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = BatteryGreenDim)
+        colors = CardDefaults.cardColors(
+            containerColor = if (isFullyCharged) BatteryGreenDim else BatteryGreenDim
+        )
     ) {
         Column(
             modifier = Modifier
@@ -386,27 +390,36 @@ fun ChargingSessionCard(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Default.BatteryChargingFull,
+                        imageVector = if (isFullyCharged) Icons.Default.BatteryFull else Icons.Default.BatteryChargingFull,
                         contentDescription = null,
                         tint = BatteryGreen,
                         modifier = Modifier.size(24.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "正在充电",
+                        text = if (isFullyCharged) "已充满" else "正在充电",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
                         color = BatteryGreen
                     )
                 }
 
-                // 充电动画指示器
-                CircularProgressIndicator(
-                    modifier = Modifier.size(24.dp),
-                    color = BatteryGreen,
-                    strokeWidth = 2.dp,
-                    trackColor = Color.Transparent
-                )
+                if (!isFullyCharged) {
+                    // 充电动画指示器
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        color = BatteryGreen,
+                        strokeWidth = 2.dp,
+                        trackColor = Color.Transparent
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = BatteryGreen,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
             }
 
             // 充电进度

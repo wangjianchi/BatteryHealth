@@ -152,7 +152,7 @@ fun HealthGaugeCard(state: HomeUiState) {
 
             Text(
                 text = if (state.averageCapacity != null && state.latestRatedCapacity != null)
-                    "估算容量：${state.averageCapacity} mAh（标称 ${state.latestRatedCapacity} mAh）"
+                    "电池额定 ${state.latestRatedCapacity} mAh，估算实际 ${state.averageCapacity} mAh"
                 else "添加充电记录开始检测",
                 fontSize = 13.sp,
                 color = OnSurfaceVariant,
@@ -172,9 +172,9 @@ fun StatsRow(state: HomeUiState) {
             modifier = Modifier.weight(1f),
             icon = Icons.Default.BatteryFull,
             iconTint = BatteryGreen,
-            value = state.averageCapacity?.let { "${it}" } ?: "--",
+            value = state.latestRatedCapacity?.let { "${it}" } ?: "--",
             unit = "mAh",
-            label = "估算容量"
+            label = "标称容量"
         )
         StatCard(
             modifier = Modifier.weight(1f),
