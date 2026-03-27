@@ -1,0 +1,337 @@
+package com.batteryhealth.app.ui.screens
+
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.batteryhealth.app.data.model.getHealthGrade
+import com.batteryhealth.app.ui.theme.*
+import com.batteryhealth.app.viewmodel.HomeUiState
+
+@Composable
+fun HomeScreen(homeState: HomeUiState) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        // Health Gauge Card
+        HealthGaugeCard(homeState)
+
+        // Stats Row
+        StatsRow(homeState)
+
+        // Health Tips
+        if (homeState.healthPercent != null) {
+            HealthTipsCard(homeState.healthPercent)
+        }
+
+        // Info Card
+        InfoCard()
+
+        Spacer(modifier = Modifier.height(80.dp))
+    }
+}
+
+@Composable
+fun HealthGaugeCard(state: HomeUiState) {
+    val healthPct = state.healthPercent
+    val grade = healthPct?.let { getHealthGrade(it) }
+    val gaugeColor = grade?.let { Color(it.color) } ?: OnSurfaceVariant
+
+    // Animated sweep angle
+    val animatedSweep by animateFloatAsState(
+        targetValue = if (healthPct != null) (healthPct / 100f) * 180f else 0f,
+        animationSpec = tween(1200, easing = FastOutSlowInEasing),
+        label = "gauge"
+    )
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = Surface)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                "电池健康度",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = OnSurfaceVariant,
+                letterSpacing = 1.sp
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Semicircle Gauge
+            Box(
+                modifier = Modifier
+                    .width(220.dp)
+                    .height(120.dp),
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val strokeWidth = 20.dp.toPx()
+                    val arcSize = Size(size.width - strokeWidth, (size.width - strokeWidth))
+                    val topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f)
+
+                    // Background arc
+                    drawArc(
+                        color = Surface3,
+                        startAngle = 180f,
+                        sweepAngle = 180f,
+                        useCenter = false,
+                        topLeft = topLeft,
+                        size = arcSize,
+                        style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                    )
+
+                    // Colored arc
+                    drawArc(
+                        color = gaugeColor,
+                        startAngle = 180f,
+                        sweepAngle = animatedSweep,
+                        useCenter = false,
+                        topLeft = topLeft,
+                        size = arcSize,
+                        style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                    )
+                }
+
+                // Center text
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = healthPct?.toString() ?: "--",
+                        fontSize = 42.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = gaugeColor,
+                        lineHeight = 42.sp
+                    )
+                    Text(
+                        text = "%",
+                        fontSize = 14.sp,
+                        color = OnSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = if (grade != null) "${grade.emoji} ${grade.label}" else "暂无数据",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = gaugeColor
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = if (state.averageCapacity != null && state.latestRatedCapacity != null)
+                    "估算容量：${state.averageCapacity} mAh（标称 ${state.latestRatedCapacity} mAh）"
+                else "添加充电记录开始检测",
+                fontSize = 13.sp,
+                color = OnSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+fun StatsRow(state: HomeUiState) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        StatCard(
+            modifier = Modifier.weight(1f),
+            icon = Icons.Default.BatteryFull,
+            iconTint = BatteryGreen,
+            value = state.averageCapacity?.let { "${it}" } ?: "--",
+            unit = "mAh",
+            label = "估算容量"
+        )
+        StatCard(
+            modifier = Modifier.weight(1f),
+            icon = Icons.Default.ListAlt,
+            iconTint = BatteryBlue,
+            value = state.recordCount.toString(),
+            unit = "次",
+            label = "记录次数"
+        )
+        StatCard(
+            modifier = Modifier.weight(1f),
+            icon = Icons.Default.CalendarToday,
+            iconTint = BatteryPurple,
+            value = if (state.recordCount > 0) state.monitoringDays.toString() else "--",
+            unit = "天",
+            label = "监测天数"
+        )
+    }
+}
+
+@Composable
+fun StatCard(
+    modifier: Modifier = Modifier,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    iconTint: Color,
+    value: String,
+    unit: String,
+    label: String
+) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = Surface)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(20.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = value,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = OnSurface
+                )
+                if (value != "--") {
+                    Spacer(modifier = Modifier.width(2.dp))
+                    Text(unit, fontSize = 10.sp, color = OnSurfaceVariant)
+                }
+            }
+            Text(
+                text = label,
+                fontSize = 10.sp,
+                color = OnSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+fun HealthTipsCard(healthPercent: Int) {
+    val tips = when {
+        healthPercent >= 90 -> listOf(
+            "✅" to "电池状态极佳，保持当前使用习惯即可",
+            "🔌" to "建议保持电量在 20%–80% 之间充电，延缓老化",
+            "🌡️" to "避免手机长时间暴露在高温环境"
+        )
+        healthPercent >= 80 -> listOf(
+            "👍" to "电池状态良好，续航表现接近新机",
+            "🔋" to "尽量避免过度放电至 5% 以下再充电",
+            "⚡" to "减少超快充频率，适当使用慢充保护电池"
+        )
+        healthPercent >= 70 -> listOf(
+            "⚠️" to "电池开始老化，续航可能缩短约 20–30%",
+            "🔄" to "可每月进行一次完整充放电校准电量计",
+            "📱" to "开启省电模式，减少后台应用活动"
+        )
+        healthPercent >= 60 -> listOf(
+            "🔶" to "电池老化明显，建议携带充电宝备用",
+            "🛠️" to "可联系官方售后评估更换电池",
+            "🚫" to "避免高负荷使用时同时充电（如玩游戏）"
+        )
+        else -> listOf(
+            "🔴" to "电池严重老化，强烈建议更换电池",
+            "⚠️" to "老化电池存在异常发热或膨胀风险",
+            "🏪" to "前往品牌授权店进行专业检测与更换服务"
+        )
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Surface)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "健康建议",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = OnSurfaceVariant,
+                letterSpacing = 0.8.sp
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            tips.forEach { (emoji, text) ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text(emoji, fontSize = 15.sp, modifier = Modifier.padding(end = 10.dp, top = 1.dp))
+                    Text(
+                        text = text,
+                        fontSize = 13.sp,
+                        color = OnSurfaceVariant,
+                        lineHeight = 19.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun InfoCard() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(BatteryBlueDim)
+            .padding(14.dp)
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Icon(
+                Icons.Default.Info,
+                contentDescription = null,
+                tint = BatteryBlue,
+                modifier = Modifier
+                    .size(16.dp)
+                    .padding(top = 1.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "通过「充电前电量」「充电后电量」「充电时长」三个参数，利用专业算法估算电池实际容量。建议累积多次记录以提升准确度。",
+                fontSize = 12.sp,
+                color = BatteryBlue,
+                lineHeight = 18.sp
+            )
+        }
+    }
+}

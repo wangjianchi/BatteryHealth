@@ -1,0 +1,21 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Ignore Gradle build output
+app/build/
+.gradle/
+build/
+
+# Ignore heap dump files
+*.hprof
+
+# Ignore local SDK paths
+local.properties
