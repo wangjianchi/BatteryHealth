@@ -84,10 +84,9 @@ fun HistoryDetailScreen(
             // 统计卡片
             StatsCard(record, dataPoints)
 
-            // 电量变化折线图
+            // 电量与功率双 Y 轴折线图
             if (dataPoints.isNotEmpty()) {
-                BatteryChartCard(dataPoints)
-                PowerChartCard(dataPoints)
+                DualAxisChartCard(dataPoints)
             } else {
                 NoDetailedDataCard()
             }
@@ -337,17 +336,15 @@ fun StatItem(
 }
 
 @Composable
-fun BatteryChartCard(dataPoints: List<ChargingDataPoint>) {
+fun DualAxisChartCard(dataPoints: List<ChargingDataPoint>) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = Surface)
     ) {
-        Column(
-            modifier = Modifier.padding(20.dp)
-        ) {
+        Column(modifier = Modifier.padding(20.dp)) {
             Text(
-                text = "电量变化曲线",
+                text = "充电过程",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = OnSurfaceVariant
@@ -355,56 +352,27 @@ fun BatteryChartCard(dataPoints: List<ChargingDataPoint>) {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            LineChart(
-                dataPoints = dataPoints,
-                valueSelector = { it.batteryPercent },
-                color = BatteryGreen,
-                label = "电量 %"
-            )
+            DualAxisChart(dataPoints)
         }
     }
 }
 
 @Composable
-fun PowerChartCard(dataPoints: List<ChargingDataPoint>) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Surface)
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp)
-        ) {
-            Text(
-                text = "功率变化曲线",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = OnSurfaceVariant
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            LineChart(
-                dataPoints = dataPoints,
-                valueSelector = { it.chargingPower },
-                color = BatteryBlue,
-                label = "功率 W"
-            )
-        }
-    }
-}
-
-@Composable
-fun LineChart(
-    dataPoints: List<ChargingDataPoint>,
-    valueSelector: (ChargingDataPoint) -> Float,
-    color: Color,
-    label: String
-) {
+fun DualAxisChart(dataPoints: List<ChargingDataPoint>) {
     if (dataPoints.isEmpty()) return
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        // 图表
+        // 图例
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            LegendItem(color = BatteryGreen, label = "电量")
+            LegendItem(color = BatteryBlue, label = "功率")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         Canvas(
             modifier = Modifier
                 .fillMaxWidth()
@@ -414,104 +382,164 @@ fun LineChart(
         ) {
             val width = size.width
             val height = size.height
-            val padding = 40f
+            val leftPadding = 40f
+            val rightPadding = 40f
+            val topPadding = 16f
+            val bottomPadding = 32f
+            val chartWidth = width - leftPadding - rightPadding
+            val chartHeight = height - topPadding - bottomPadding
 
-            val values = dataPoints.map { valueSelector(it) }
-            val minValue = values.minOrNull() ?: 0f
-            val maxValue = values.maxOrNull() ?: 100f
-            val valueRange = (maxValue - minValue).coerceAtLeast(1f)
+            val baseTime = dataPoints.first().timestamp
 
-            // 绘制网格线
-            for (i in 0..4) {
-                val y = padding + (height - 2 * padding) * i / 4
+            // 电量 (左Y轴)
+            val batteryValues = dataPoints.map { it.batteryPercent }
+            val minBattery = 0f
+            val maxBattery = 100f
+
+            // 功率 (右Y轴)
+            val powerValues = dataPoints.map { it.chargingPower }.filter { it > 0 }
+            val minPower = 0f
+            val maxPower = (powerValues.maxOrNull() ?: 100f) * 1.1f
+
+            // 绘制水平网格线
+            val gridCount = 5
+            for (i in 0..gridCount) {
+                val y = topPadding + chartHeight * i / gridCount
                 drawLine(
                     color = Color.Gray.copy(alpha = 0.2f),
-                    start = Offset(padding, y),
-                    end = Offset(width - padding, y),
+                    start = Offset(leftPadding, y),
+                    end = Offset(width - rightPadding, y),
                     strokeWidth = 1f
                 )
             }
 
-            // 绘制折线
-            val path = Path()
+            // 绘制电量折线
+            val batteryPath = Path()
             dataPoints.forEachIndexed { index, point ->
-                val x = padding + (width - 2 * padding) * index / (dataPoints.size - 1).coerceAtLeast(1)
-                val y = padding + (height - 2 * padding) * (1 - (valueSelector(point) - minValue) / valueRange)
+                val x = leftPadding + chartWidth * index / (dataPoints.size - 1).coerceAtLeast(1)
+                val ratio = (point.batteryPercent - minBattery) / (maxBattery - minBattery)
+                val y = topPadding + chartHeight * (1 - ratio)
+                if (index == 0) batteryPath.moveTo(x, y) else batteryPath.lineTo(x, y)
+                drawCircle(color = BatteryGreen, radius = 3f, center = Offset(x, y))
+            }
+            drawPath(path = batteryPath, color = BatteryGreen, style = Stroke(width = 2.5f))
 
-                if (index == 0) {
-                    path.moveTo(x, y)
-                } else {
-                    path.lineTo(x, y)
+            // 绘制功率折线
+            val powerIndices = dataPoints.mapIndexedNotNull { index, point ->
+                if (point.chargingPower > 0) index else null
+            }
+            if (powerIndices.size >= 2) {
+                val powerPath = Path()
+                dataPoints.forEachIndexed { index, point ->
+                    if (point.chargingPower > 0) {
+                        val x = leftPadding + chartWidth * index / (dataPoints.size - 1).coerceAtLeast(1)
+                        val ratio = (point.chargingPower - minPower) / (maxPower - minPower)
+                        val y = topPadding + chartHeight * (1 - ratio)
+                        if (powerIndices.indexOf(index) == 0) {
+                            powerPath.moveTo(x, y)
+                        } else {
+                            powerPath.lineTo(x, y)
+                        }
+                        drawCircle(color = BatteryBlue, radius = 3f, center = Offset(x, y))
+                    }
                 }
+                drawPath(path = powerPath, color = BatteryBlue, style = Stroke(width = 2.5f))
+            }
 
-                // 绘制数据点
-                drawCircle(
-                    color = color,
-                    radius = 4f,
-                    center = Offset(x, y)
+            // 左Y轴标签 (电量)
+            for (i in 0..4) {
+                val y = topPadding + chartHeight * i / 4
+                val label = "${(100 - 25 * i)}%"
+                drawContext.canvas.nativeCanvas.drawText(
+                    label,
+                    leftPadding - 8f,
+                    y + 4f,
+                    android.graphics.Paint().apply {
+                        color = android.graphics.Color.parseColor("#4CAF50")
+                        textSize = 24f
+                        textAlign = android.graphics.Paint.Align.RIGHT
+                    }
                 )
             }
 
-            drawPath(
-                path = path,
-                color = color,
-                style = Stroke(width = 3f)
-            )
+            // 右Y轴标签 (功率)
+            for (i in 0..4) {
+                val y = topPadding + chartHeight * i / 4
+                val label = "${(maxPower * (1 - i / 4f)).toInt()}W"
+                drawContext.canvas.nativeCanvas.drawText(
+                    label,
+                    width - rightPadding + 8f,
+                    y + 4f,
+                    android.graphics.Paint().apply {
+                        color = android.graphics.Color.parseColor("#2196F3")
+                        textSize = 24f
+                        textAlign = android.graphics.Paint.Align.LEFT
+                    }
+                )
+            }
+
+            // X轴标签 (时间)
+            val labelCount = minOf(dataPoints.size, 6)
+            for (i in 0 until labelCount) {
+                val index = (dataPoints.size - 1) * i / (labelCount - 1).coerceAtLeast(1)
+                val point = dataPoints[index]
+                val x = leftPadding + chartWidth * index / (dataPoints.size - 1).coerceAtLeast(1)
+                val diffSec = (point.timestamp - baseTime) / 1000
+                val label = if (diffSec >= 3600) {
+                    String.format("%d:%02d:%02d", diffSec / 3600, (diffSec % 3600) / 60, diffSec % 60)
+                } else {
+                    String.format("%d:%02d", diffSec / 60, diffSec % 60)
+                }
+                drawContext.canvas.nativeCanvas.drawText(
+                    label,
+                    x,
+                    height - 4f,
+                    android.graphics.Paint().apply {
+                        color = android.graphics.Color.GRAY
+                        textSize = 22f
+                        textAlign = android.graphics.Paint.Align.CENTER
+                    }
+                )
+            }
         }
 
-        // Y轴标签
-        if (dataPoints.isNotEmpty()) {
-            val values = dataPoints.map { valueSelector(it) }
-            val maxValue = values.maxOrNull() ?: 100f
-            val minValue = values.minOrNull() ?: 0f
-
-            Row(
+        // 时间范围说明
+        if (dataPoints.size >= 2) {
+            val start = dataPoints.first().timestamp
+            val end = dataPoints.last().timestamp
+            val totalSec = (end - start) / 1000
+            val totalStr = if (totalSec >= 3600) {
+                String.format("总时长: %d:%02d:%02d", totalSec / 3600, (totalSec % 3600) / 60, totalSec % 60)
+            } else {
+                String.format("总时长: %d:%02d", totalSec / 60, totalSec % 60)
+            }
+            Text(
+                text = totalStr,
+                fontSize = 11.sp,
+                color = OnSurfaceVariant,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "0",
-                    fontSize = 10.sp,
-                    color = OnSurfaceVariant
-                )
-                Text(
-                    text = "${((maxValue + minValue) / 2).toInt()} $label",
-                    fontSize = 10.sp,
-                    color = OnSurfaceVariant
-                )
-                Text(
-                    text = "${maxValue.toInt()} $label",
-                    fontSize = 10.sp,
-                    color = OnSurfaceVariant
-                )
-            }
-
-            // 时间范围
-            if (dataPoints.size >= 2) {
-                val startTime = formatTimeFromTimestamp(dataPoints.first().timestamp, dataPoints.first().timestamp)
-                val endTime = formatTimeFromTimestamp(dataPoints.last().timestamp, dataPoints.first().timestamp)
-                Text(
-                    text = "$startTime → $endTime",
-                    fontSize = 11.sp,
-                    color = OnSurfaceVariant,
-                    modifier = Modifier.align(Alignment.CenterHorizontally)
-                )
-            }
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
         }
     }
 }
 
-fun formatTimeFromTimestamp(timestamp: Long, baseTimestamp: Long): String {
-    val diffSeconds = kotlin.math.abs(timestamp - baseTimestamp) / 1000
-    val diffMinutes = diffSeconds / 60
-    val hours = (diffMinutes / 60).toInt()
-    val mins = (diffMinutes % 60).toInt()
-    return if (hours > 0) {
-        String.format("%02d:%02d:%02d", hours, mins, (diffSeconds % 60).toInt())
-    } else {
-        String.format("%02d:%02d", mins, (diffSeconds % 60).toInt())
+@Composable
+fun LegendItem(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Canvas(modifier = Modifier.size(24.dp)) {
+            drawLine(
+                color = color,
+                start = Offset(0f, size.height / 2),
+                end = Offset(size.width, size.height / 2),
+                strokeWidth = 3f
+            )
+            drawCircle(color = color, radius = 4f, center = Offset(size.width / 2, size.height / 2))
+        }
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(text = label, fontSize = 12.sp, color = OnSurfaceVariant)
     }
 }
 
