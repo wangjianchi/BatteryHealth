@@ -123,8 +123,10 @@ class BatteryManager(private val context: Context) {
         // 计算充电功率 (W) - 考虑双电芯
         val chargingWatt = calculateChargingPower(batteryStatus, isCharging, isDualBattery)
 
-        // 获取标称容量
+        // 获取标称容量（优先使用设计容量）
         val ratedCapacity = getRatedCapacity()
+        val designCapacity = getDesignCapacity()
+        val systemHealth = getSystemHealthPercent()
 
         return BatteryInfo(
             level = level,
@@ -137,6 +139,8 @@ class BatteryManager(private val context: Context) {
             temperature = temperature,
             chargingPower = chargingWatt,
             ratedCapacity = ratedCapacity,
+            designCapacity = designCapacity,
+            systemHealthPercent = systemHealth,
             technology = batteryStatus.getStringExtra(BatteryManager.EXTRA_TECHNOLOGY) ?: "Unknown",
             isDualBattery = isDualBattery
         )
@@ -269,71 +273,18 @@ class BatteryManager(private val context: Context) {
         return when {
             batteryLevel < 50 -> maxPower // 0-50%: 满功率快充
             batteryLevel < 80 -> maxPower * 0.7f // 50-80%: 降低功率
-            else -> maxPower * 0.4f // 80-100%: 涓流充电
+            batteryLevel < 95 -> maxPower * 0.3f // 80-95%: 涓流初期，估算值应更低
+            else -> maxPower * 0.15f // 95-100%: 接近充满，实际功率极低
         }
     }
 
     /**
-     * 获取电池标称容量（mAh）
-     * 尝试从多个来源读取真实容量
+     * 获取电池设计容量（mAh）
+     * 这是电池出厂时的标称容量，用于计算健康度
+     * 优先级：sysfs > 系统API > 0
      */
-    private fun getRatedCapacity(): Int {
-        val manufacturer = Build.MANUFACTURER
-        val model = Build.MODEL
-
-        // 方法1: 通过 PowerProfile 获取电池容量（最可靠）
-        val powerProfileCapacity = getCapacityFromPowerProfile()
-        if (powerProfileCapacity > 0) {
-            Log.d(TAG, "从 PowerProfile 读取容量: ${powerProfileCapacity}mAh")
-            return powerProfileCapacity
-        }
-
-        // 方法2: 已知设备使用型号数据库
-        val capacityFromModel = getCapacityFromModel()
-        if (capacityFromModel > 0) {
-            Log.d(TAG, "从型号数据库读取容量: ${capacityFromModel}mAh (型号: $manufacturer $model)")
-            return capacityFromModel
-        }
-
-        // 方法3: 尝试从系统读取设计容量
-        try {
-            val batteryManagerSvc = context.getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager
-            if (batteryManagerSvc != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                // 尝试 BATTERY_PROPERTY_CHARGE_COUNTER_DESIGN（通过反射）
-                try {
-                    val field = android.os.BatteryManager::class.java.getField("BATTERY_PROPERTY_CHARGE_COUNTER_DESIGN")
-                    val propertyId = field.getInt(null)
-                    val capacityMicroAh = batteryManagerSvc.getLongProperty(propertyId)
-                    if (capacityMicroAh > 0) {
-                        val capacityMah = (capacityMicroAh / 1000).toInt()
-                        if (capacityMah in 2000..8000) {
-                            Log.d(TAG, "从系统读取设计容量: ${capacityMah}mAh")
-                            return capacityMah
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "CHARGE_COUNTER_DESIGN 不可用: ${e.message}")
-                }
-
-                // 备选：ENERGY_COUNTER（nWh）
-                try {
-                    val capacityNWattH = batteryManagerSvc.getLongProperty(android.os.BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER)
-                    if (capacityNWattH > 0) {
-                        val capacityMah = (capacityNWattH / 1000000f / 3.8f).toInt()
-                        if (capacityMah in 2000..8000) {
-                            Log.d(TAG, "从系统读取能量容量: ${capacityMah}mAh")
-                            return capacityMah
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "ENERGY_COUNTER 不可用: ${e.message}")
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "无法从系统读取容量: ${e.message}")
-        }
-
-        // 方法4: 尝试从sysfs读取
+    fun getDesignCapacity(): Int {
+        // 方法1: 优先从 sysfs 读取（最可靠）
         try {
             val files = listOf(
                 "/sys/class/power_supply/battery/charge_full_design",
@@ -347,16 +298,15 @@ class BatteryManager(private val context: Context) {
                     val content = java.io.File(file).readText().trim()
                     val value = content.toLongOrNull() ?: continue
 
-                    val capacityMah = if (value > 10000000) {
-                        (value / 1000).toInt()
-                    } else if (value > 10000) {
-                        (value / 1000).toInt()
-                    } else {
-                        continue
+                    val capacityMah = when {
+                        value > 10000000 -> (value / 1000).toInt()
+                        value > 10000 -> (value / 1000).toInt()
+                        value > 100 -> value.toInt()  // 可能已经是 μAh
+                        else -> continue
                     }
 
                     if (capacityMah in 2000..8000) {
-                        Log.d(TAG, "从sysfs读取容量: ${capacityMah}mAh")
+                        Log.d(TAG, "从sysfs读取设计容量: ${capacityMah}mAh (来源: $file)")
                         return capacityMah
                     }
                 } catch (e: Exception) {
@@ -364,10 +314,77 @@ class BatteryManager(private val context: Context) {
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "无法从sysfs读取: ${e.message}")
+            Log.w(TAG, "sysfs读取失败: ${e.message}")
         }
 
-        Log.w(TAG, "无法自动获取容量，返回0")
+        // 方法2: 从系统API读取
+        try {
+            val batteryManagerSvc = context.getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager
+            if (batteryManagerSvc != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                // 方式A: BATTERY_PROPERTY_CHARGE_COUNTER_DESIGN
+                try {
+                    val field = android.os.BatteryManager::class.java.getField("BATTERY_PROPERTY_CHARGE_COUNTER_DESIGN")
+                    val propertyId = field.getInt(null)
+                    val capacityMicroAh = batteryManagerSvc.getLongProperty(propertyId)
+                    if (capacityMicroAh > 0) {
+                        val capacityMah = (capacityMicroAh / 1000).toInt()
+                        if (capacityMah in 2000..8000) {
+                            Log.d(TAG, "从系统API读取设计容量: ${capacityMah}mAh")
+                            return capacityMah
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "CHARGE_COUNTER_DESIGN 不可用: ${e.message}")
+                }
+
+                // 方式B: ENERGY_COUNTER (nWh)
+                try {
+                    val capacityNWattH = batteryManagerSvc.getLongProperty(android.os.BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER)
+                    if (capacityNWattH > 0) {
+                        val capacityMah = (capacityNWattH / 1000000f / 3.8f).toInt()
+                        if (capacityMah in 2000..8000) {
+                            Log.d(TAG, "从ENERGY_COUNTER读取设计容量: ${capacityMah}mAh")
+                            return capacityMah
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "ENERGY_COUNTER 不可用: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "系统API读取失败: ${e.message}")
+        }
+
+        Log.w(TAG, "无法读取设计容量，返回0")
+        return 0
+    }
+
+    /**
+     * 获取电池标称容量（mAh）
+     * 优先使用设计容量，其次型号数据库（出厂标称），最后 PowerProfile（可能是当前容量）
+     */
+    private fun getRatedCapacity(): Int {
+        // 方法1: 直接复用设计容量读取（sysfs 或系统API）
+        val designCapacity = getDesignCapacity()
+        if (designCapacity > 0) {
+            return designCapacity
+        }
+
+        // 方法2: 已知设备的型号数据库（出厂标称容量，最可靠）
+        val capacityFromModel = getCapacityFromModel()
+        if (capacityFromModel > 0) {
+            Log.d(TAG, "从型号数据库读取标称容量: ${capacityFromModel}mAh")
+            return capacityFromModel
+        }
+
+        // 方法3: PowerProfile（可能返回当前最大容量，不是出厂标称）
+        val powerProfileCapacity = getCapacityFromPowerProfile()
+        if (powerProfileCapacity > 0) {
+            Log.d(TAG, "从 PowerProfile 读取容量: ${powerProfileCapacity}mAh")
+            return powerProfileCapacity
+        }
+
+        Log.w(TAG, "无法获取标称容量，返回0")
         return 0
     }
 
@@ -479,6 +496,282 @@ class BatteryManager(private val context: Context) {
     }
 
     /**
+     * 计算系统健康度百分比
+     * 基于当前实际容量与设计容量的比值
+     */
+    fun getSystemHealthPercent(): Int {
+        val design = getDesignCapacity()
+        if (design <= 0) return -1
+
+        // 尝试读取当前实际容量（通过 charge_full 或其他途径）
+        val currentCapacity = getCurrentCapacity()
+        if (currentCapacity > 0) {
+            return ((currentCapacity.toFloat() / design.toFloat()) * 100f).toInt().coerceIn(0, 100)
+        }
+
+        return -1
+    }
+
+    /**
+     * 计算所有5种健康度估算方案
+     * @param records 充电历史记录（用于功率积分、百分比法、历史加权）
+     */
+    fun calculateAllHealthEstimations(
+        records: List<HealthRecordInput> = emptyList()
+    ): HealthEstimationResult {
+        // 读取容量数据：优先 sysfs，回退到型号数据库
+        val designCapacity = getDesignCapacity()           // sysfs 设计容量
+        val currentCapacity = getCurrentCapacity()         // sysfs 当前容量
+        val ratedCapacityFallback = getCapacityFromModel() // 型号数据库标称容量
+
+        // 决定基准容量（用于计算健康度的分母）
+        // 优先用 designCapacity（有 sysfs），回退到型号数据库标称容量
+        val baseCapacity = if (designCapacity > 0) designCapacity else ratedCapacityFallback
+
+        // 方案1：系统设计容量（直接读取内核，最准确）
+        val systemDesign = if (designCapacity > 0 && currentCapacity > 0) {
+            HealthEstimation(
+                value = (currentCapacity * 100 / designCapacity).coerceIn(0, 100),
+                capacity = currentCapacity,
+                label = "系统设计容量",
+                reliability = 1
+            )
+        } else if (currentCapacity > 0 && ratedCapacityFallback > 0) {
+            // sysfs 设计容量读不到但当前容量能读到，用型号数据库作基准
+            HealthEstimation(
+                value = (currentCapacity * 100 / ratedCapacityFallback).coerceIn(0, 100),
+                capacity = currentCapacity,
+                label = "系统设计容量",
+                reliability = 2
+            )
+        } else {
+            HealthEstimation(value = -1, capacity = 0, label = "系统设计容量", reliability = 1)
+        }
+
+        // 方案2：系统当前容量（直接读取 charge_full）
+        val systemCurrent = if (currentCapacity > 0) {
+            val base = if (designCapacity > 0) designCapacity else ratedCapacityFallback
+            if (base > 0) {
+                HealthEstimation(
+                    value = (currentCapacity * 100 / base).coerceIn(0, 100),
+                    capacity = currentCapacity,
+                    label = "系统当前容量",
+                    reliability = 1
+                )
+            } else {
+                HealthEstimation(value = -1, capacity = 0, label = "系统当前容量", reliability = 1)
+            }
+        } else {
+            HealthEstimation(value = -1, capacity = 0, label = "系统当前容量", reliability = 1)
+        }
+
+        // 方案3：功率积分法（使用最近的充电记录）
+        val powerBased = if (records.isNotEmpty()) {
+            val latestRecord = records.last()
+            if (latestRecord.chargedMinutes > 0 && latestRecord.chargedPercent > 0f) {
+                val powerBasedCapacity = calculatePowerBasedCapacity(
+                    latestRecord.chargedMinutes,
+                    latestRecord.chargedPercent,
+                    latestRecord.chargingWatt
+                )
+                if (powerBasedCapacity > 0 && baseCapacity > 0) {
+                    HealthEstimation(
+                        value = (powerBasedCapacity * 100 / baseCapacity).coerceIn(0, 100),
+                        capacity = powerBasedCapacity,
+                        label = "功率积分法",
+                        reliability = 2
+                    )
+                } else if (powerBasedCapacity > 0 && latestRecord.ratedCapacity > 0) {
+                    // 没有基准容量时，用记录中的标称容量
+                    HealthEstimation(
+                        value = (powerBasedCapacity * 100 / latestRecord.ratedCapacity).coerceIn(0, 100),
+                        capacity = powerBasedCapacity,
+                        label = "功率积分法",
+                        reliability = 3
+                    )
+                } else {
+                    HealthEstimation(value = -1, capacity = 0, label = "功率积分法", reliability = 2)
+                }
+            } else {
+                HealthEstimation(value = -1, capacity = 0, label = "功率积分法", reliability = 2)
+            }
+        } else {
+            HealthEstimation(value = -1, capacity = 0, label = "功率积分法", reliability = 2)
+        }
+
+        // 方案4：百分比法（使用最近的充电记录）
+        val percentBased = if (records.isNotEmpty()) {
+            val latestRecord = records.last()
+            if (latestRecord.ratedCapacity > 0 && latestRecord.chargedPercent > 0f) {
+                val efficiency = getChargingEfficiencyForPercent(latestRecord.chargedPercent)
+                val percentBasedCapacity = (latestRecord.chargedPercent / 100f * latestRecord.ratedCapacity / efficiency).toInt()
+                if (percentBasedCapacity > 0 && baseCapacity > 0) {
+                    HealthEstimation(
+                        value = (percentBasedCapacity * 100 / baseCapacity).coerceIn(0, 100),
+                        capacity = percentBasedCapacity,
+                        label = "百分比法",
+                        reliability = 3
+                    )
+                } else {
+                    HealthEstimation(value = -1, capacity = 0, label = "百分比法", reliability = 3)
+                }
+            } else {
+                HealthEstimation(value = -1, capacity = 0, label = "百分比法", reliability = 3)
+            }
+        } else {
+            HealthEstimation(value = -1, capacity = 0, label = "百分比法", reliability = 3)
+        }
+
+        // 方案5：历史加权平均
+        val historyWeighted = if (records.size >= 2) {
+            val weightedAvg = calculateWeightedAverage(records)
+            if (weightedAvg > 0 && baseCapacity > 0) {
+                HealthEstimation(
+                    value = (weightedAvg * 100 / baseCapacity).coerceIn(0, 100),
+                    capacity = weightedAvg,
+                    label = "历史加权法",
+                    reliability = 2
+                )
+            } else if (weightedAvg > 0) {
+                HealthEstimation(value = -1, capacity = weightedAvg, label = "历史加权法", reliability = 2)
+            } else {
+                HealthEstimation(value = -1, capacity = 0, label = "历史加权法", reliability = 2)
+            }
+        } else if (records.size == 1) {
+            // 单条记录直接用功率积分结果
+            powerBased
+        } else {
+            HealthEstimation(value = -1, capacity = 0, label = "历史加权法", reliability = 2)
+        }
+
+        return HealthEstimationResult(
+            systemDesign = systemDesign,
+            systemCurrent = systemCurrent,
+            powerIntegral = powerBased,
+            percentBased = percentBased,
+            historyWeighted = historyWeighted
+        )
+    }
+
+    /**
+     * 功率积分法计算电池容量
+     */
+    private fun calculatePowerBasedCapacity(
+        chargedMinutes: Int,
+        chargedPercent: Float,
+        chargingWatt: Float?
+    ): Int {
+        if (chargedPercent <= 0f) return 0
+
+        val chargedCapacity = if (chargingWatt != null && chargingWatt > 0f) {
+            val durationHours = chargedMinutes / 60f
+            val energyWh = chargingWatt * durationHours
+            val avgVoltage = 4.0f
+            val efficiency = getChargingEfficiencyForPercent(chargedPercent)
+            (energyWh / avgVoltage * 1000 * efficiency).toInt()
+        } else {
+            // 无功率数据时用百分比法
+            return 0
+        }
+
+        if (chargedCapacity <= 0) return 0
+        return (chargedCapacity / (chargedPercent / 100f)).toInt().coerceAtLeast(0)
+    }
+
+    /**
+     * 根据充电百分比获取效率系数
+     */
+    private fun getChargingEfficiencyForPercent(chargedPercent: Float): Double {
+        return when {
+            chargedPercent > 80f -> 0.80
+            chargedPercent > 60f -> 0.85
+            chargedPercent > 40f -> 0.88
+            chargedPercent > 20f -> 0.90
+            else -> 0.92
+        }
+    }
+
+    /**
+     * 历史加权平均计算容量
+     */
+    private fun calculateWeightedAverage(records: List<HealthRecordInput>): Int {
+        var totalWeight = 0f
+        var weightedSum = 0f
+        records.forEachIndexed { i, r ->
+            val w = ((i + 1) * (i + 1)).toFloat()
+            val cap = calculatePowerBasedCapacity(r.chargedMinutes, r.chargedPercent, r.chargingWatt)
+            if (cap > 0) {
+                weightedSum += cap * w
+                totalWeight += w
+            }
+        }
+        return if (totalWeight > 0f) (weightedSum / totalWeight).toInt() else 0
+    }
+
+    /**
+     * 获取电池当前实际容量（mAh）
+     * 尝试从 sysfs 读取 charge_full（电池当前最大容量，随老化变化）
+     */
+    private fun getCurrentCapacity(): Int {
+        try {
+            val files = listOf(
+                "/sys/class/power_supply/battery/charge_full",
+                "/sys/class/power_supply/bms/charge_full",
+                "/sys/class/power_supply/battery/capacity"
+            )
+
+            for (file in files) {
+                try {
+                    val content = java.io.File(file).readText().trim()
+                    val value = content.toLongOrNull() ?: continue
+
+                    val capacityMah = when {
+                        value > 10000000 -> (value / 1000).toInt()
+                        value > 10000 -> (value / 1000).toInt()
+                        value > 100 -> value.toInt()
+                        else -> continue
+                    }
+
+                    if (capacityMah in 1000..8000) {
+                        Log.d(TAG, "从sysfs读取当前容量: ${capacityMah}mAh (来源: $file)")
+                        return capacityMah
+                    }
+                } catch (e: Exception) {
+                    // 跳过
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "读取当前容量失败: ${e.message}")
+        }
+
+        // 备选：从系统API读取当前容量
+        try {
+            val batteryManagerSvc = context.getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager
+            if (batteryManagerSvc != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                // BATTERY_PROPERTY_CHARGE_COUNTER 是当前容量
+                try {
+                    val field = android.os.BatteryManager::class.java.getField("BATTERY_PROPERTY_CHARGE_COUNTER")
+                    val propertyId = field.getInt(null)
+                    val capacityMicroAh = batteryManagerSvc.getLongProperty(propertyId)
+                    if (capacityMicroAh > 0) {
+                        val capacityMah = (capacityMicroAh / 1000).toInt()
+                        if (capacityMah in 1000..8000) {
+                            Log.d(TAG, "从系统API读取当前容量: ${capacityMah}mAh")
+                            return capacityMah
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "CHARGE_COUNTER 不可用: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "系统API读取当前容量失败: ${e.message}")
+        }
+
+        return 0
+    }
+
+    /**
      * 获取充电健康信息
      */
     fun getBatteryHealthInfo(): BatteryHealthInfo {
@@ -548,7 +841,9 @@ data class BatteryInfo(
     val voltage: Int = -1, // 毫伏
     val temperature: Int = -1, // 十分之一摄氏度
     val chargingPower: Float = 0f, // 瓦特
-    val ratedCapacity: Int = 0, // mAh
+    val ratedCapacity: Int = 0, // mAh（标称容量，等于设计容量）
+    val designCapacity: Int = 0, // mAh（设计容量）
+    val systemHealthPercent: Int = -1, // 系统健康度百分比（-1表示无法读取）
     val technology: String = "Unknown",
     val isDualBattery: Boolean = false // 是否为双电芯设备
 ) {
@@ -596,6 +891,61 @@ data class BatteryInfo(
             else -> "--"
         }
 }
+
+/**
+ * 单种健康度估算结果
+ */
+data class HealthEstimation(
+    val value: Int,      // 健康度百分比，-1表示无法计算
+    val capacity: Int,   // 估算的容量mAh，0表示无法计算
+    val label: String,   // 显示名称
+    val reliability: Int // 可靠性 1-3，1最高
+)
+
+/**
+ * 电池健康度估算结果（包含5种方案）
+ */
+data class HealthEstimationResult(
+    val systemDesign: HealthEstimation,   // 方案1：系统设计容量
+    val systemCurrent: HealthEstimation,  // 方案2：系统当前容量
+    val powerIntegral: HealthEstimation,  // 方案3：功率积分法
+    val percentBased: HealthEstimation,   // 方案4：百分比法
+    val historyWeighted: HealthEstimation // 方案5：历史加权法
+) {
+    /** 获取所有有效估算值的平均值 */
+    val average: Int?
+        get() {
+            val valid = listOf(systemDesign, systemCurrent, powerIntegral, percentBased, historyWeighted)
+                .filter { it.value > 0 }
+            if (valid.isEmpty()) return null
+            return valid.sumOf { it.value } / valid.size
+        }
+
+    /** 获取所有有效估算值中的中位数 */
+    val median: Int?
+        get() {
+            val valid = listOf(systemDesign, systemCurrent, powerIntegral, percentBased, historyWeighted)
+                .filter { it.value > 0 }
+                .map { it.value }
+                .sorted()
+            if (valid.isEmpty()) return null
+            return if (valid.size % 2 == 0) {
+                (valid[valid.size / 2 - 1] + valid[valid.size / 2]) / 2
+            } else {
+                valid[valid.size / 2]
+            }
+        }
+}
+
+/**
+ * 用于健康度估算的充电记录输入
+ */
+data class HealthRecordInput(
+    val ratedCapacity: Int,      // 标称容量 mAh
+    val chargedPercent: Float,   // 充电百分比
+    val chargedMinutes: Int,     // 充电时长（分钟）
+    val chargingWatt: Float?     // 充电功率 W
+)
 
 /**
  * 电池健康信息数据类

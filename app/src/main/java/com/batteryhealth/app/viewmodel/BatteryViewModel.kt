@@ -10,6 +10,8 @@ import com.batteryhealth.app.data.repository.BatteryDatabase
 import com.batteryhealth.app.data.repository.BatteryRepository
 import com.batteryhealth.app.manager.BatteryManager
 import com.batteryhealth.app.manager.BatteryInfo
+import com.batteryhealth.app.manager.HealthEstimationResult
+import com.batteryhealth.app.manager.HealthRecordInput
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -34,7 +36,9 @@ data class HomeUiState(
     val healthPercent: Int? = null,
     val recordCount: Int = 0,
     val monitoringDays: Long = 0L,
-    val latestRatedCapacity: Int? = null
+    val latestRatedCapacity: Int? = null,
+    val systemHealthPercent: Int = -1,
+    val healthEstimations: HealthEstimationResult? = null
 )
 
 data class ChargingMonitorUiState(
@@ -80,30 +84,43 @@ class BatteryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun updateHomeState(records: List<ChargingRecord>) {
+        // 获取系统健康度（从 sysfs 读取，不依赖充电记录）
+        val batteryInfo = batteryManager.getBatteryInfo()
+        val systemHealth = batteryInfo.systemHealthPercent
+
+        // 准备历史记录输入（用于功率积分、百分比法、历史加权）
+        val healthRecordInputs = records.map { r ->
+            HealthRecordInput(
+                ratedCapacity = r.ratedCapacity,
+                chargedPercent = (r.batteryAfter - r.batteryBefore).toFloat(),
+                chargedMinutes = r.chargingMinutes,
+                chargingWatt = r.chargingWatt
+            )
+        }
+
+        // 计算所有5种健康度估算方案
+        val estimations = batteryManager.calculateAllHealthEstimations(healthRecordInputs)
+
         if (records.isEmpty()) {
-            // 没有记录时，显示系统读取的容量
-            val currentCapacity = batteryManager.getBatteryInfo().ratedCapacity
             _homeState.value = HomeUiState(
-                latestRatedCapacity = if (currentCapacity > 0) currentCapacity else null
+                latestRatedCapacity = if (batteryInfo.ratedCapacity > 0) batteryInfo.ratedCapacity else null,
+                systemHealthPercent = systemHealth,
+                healthEstimations = estimations
             )
             return
         }
 
         val avgCap = repository.calculateWeightedAverageCapacity(records)
+        val currentSystemCapacity = batteryInfo.ratedCapacity
 
-        // 获取系统当前读取的容量（优先）
-        val currentSystemCapacity = batteryManager.getBatteryInfo().ratedCapacity
-
-        // 从历史记录中获取容量，但过滤掉不合理的值（>10000mAh很可能是错误数据）
         val historicalCapacity = records.map { it.ratedCapacity }
-            .filter { it in 1000..10000 }  // 合理范围：1000-10000mAh
+            .filter { it in 1000..10000 }
             .lastOrNull()
 
-        // 优先使用系统读取，回退到合理的历史记录
         val latestRated = when {
-            currentSystemCapacity > 0 -> currentSystemCapacity  // 优先：系统读取
-            historicalCapacity != null -> historicalCapacity     // 备用：合理的历史值
-            else -> records.lastOrNull()?.ratedCapacity          // 最后：原始值
+            currentSystemCapacity > 0 -> currentSystemCapacity
+            historicalCapacity != null -> historicalCapacity
+            else -> records.lastOrNull()?.ratedCapacity
         }
 
         val healthPct = if (avgCap != null && latestRated != null) {
@@ -121,7 +138,9 @@ class BatteryViewModel(application: Application) : AndroidViewModel(application)
             healthPercent = healthPct,
             recordCount = records.size,
             monitoringDays = days,
-            latestRatedCapacity = latestRated
+            latestRatedCapacity = latestRated,
+            systemHealthPercent = systemHealth,
+            healthEstimations = estimations
         )
     }
 

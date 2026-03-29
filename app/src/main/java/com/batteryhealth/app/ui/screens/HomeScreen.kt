@@ -24,6 +24,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.batteryhealth.app.data.model.getHealthGrade
+import com.batteryhealth.app.manager.HealthEstimation
+import com.batteryhealth.app.manager.HealthEstimationResult
 import com.batteryhealth.app.ui.theme.*
 import com.batteryhealth.app.viewmodel.HomeUiState
 
@@ -38,6 +40,11 @@ fun HomeScreen(homeState: HomeUiState) {
     ) {
         // Health Gauge Card
         HealthGaugeCard(homeState)
+
+        // 5 Methods Comparison Card
+        if (homeState.healthEstimations != null) {
+            HealthMethodsComparisonCard(homeState.healthEstimations)
+        }
 
         // Stats Row
         StatsRow(homeState)
@@ -56,9 +63,11 @@ fun HomeScreen(homeState: HomeUiState) {
 
 @Composable
 fun HealthGaugeCard(state: HomeUiState) {
-    val healthPct = state.healthPercent
+    // 优先使用系统健康度（来自内核数据，最准确），否则用充电估算
+    val healthPct = if (state.systemHealthPercent >= 0) state.systemHealthPercent else state.healthPercent
     val grade = healthPct?.let { getHealthGrade(it) }
     val gaugeColor = grade?.let { Color(it.color) } ?: OnSurfaceVariant
+    val isSystemHealth = state.systemHealthPercent >= 0
 
     // Animated sweep angle
     val animatedSweep by animateFloatAsState(
@@ -151,9 +160,14 @@ fun HealthGaugeCard(state: HomeUiState) {
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = if (state.averageCapacity != null && state.latestRatedCapacity != null)
-                    "电池额定 ${state.latestRatedCapacity} mAh，估算实际 ${state.averageCapacity} mAh"
-                else "添加充电记录开始检测",
+                text = when {
+                    isSystemHealth && state.averageCapacity != null && state.latestRatedCapacity != null ->
+                        "系统值 ${state.systemHealthPercent}% | 充电估算 ${state.healthPercent ?: "--"}%"
+                    isSystemHealth -> "来自系统内核数据"
+                    state.averageCapacity != null && state.latestRatedCapacity != null ->
+                        "额定 ${state.latestRatedCapacity} mAh，估算 ${state.averageCapacity} mAh"
+                    else -> "添加充电记录开始检测"
+                },
                 fontSize = 13.sp,
                 color = OnSurfaceVariant,
                 textAlign = TextAlign.Center
@@ -192,6 +206,31 @@ fun StatsRow(state: HomeUiState) {
             unit = "天",
             label = "监测天数"
         )
+    }
+
+    // 系统健康度（如果有的话）
+    if (state.systemHealthPercent >= 0) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.Favorite,
+                iconTint = if (state.systemHealthPercent >= 80) BatteryGreen else BatteryYellow,
+                value = "${state.systemHealthPercent}",
+                unit = "%",
+                label = "系统健康度"
+            )
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.BatteryChargingFull,
+                iconTint = BatteryBlue,
+                value = state.latestRatedCapacity?.let { "${it}" } ?: "--",
+                unit = "mAh",
+                label = "设计容量"
+            )
+        }
     }
 }
 
@@ -333,5 +372,160 @@ fun InfoCard() {
                 lineHeight = 18.sp
             )
         }
+    }
+}
+
+@Composable
+fun HealthMethodsComparisonCard(estimations: HealthEstimationResult) {
+    val allEstimations = listOf(
+        estimations.systemDesign,
+        estimations.systemCurrent,
+        estimations.powerIntegral,
+        estimations.percentBased,
+        estimations.historyWeighted
+    )
+
+    val validEstimations = allEstimations.filter { it.value > 0 }
+    val avgValue = estimations.average
+    val medianValue = estimations.median
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Surface)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Compare,
+                        contentDescription = null,
+                        tint = BatteryPurple,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        "健康度估算对比",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = OnSurface
+                    )
+                }
+                if (avgValue != null) {
+                    Text(
+                        "均值 ${avgValue}%",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = BatteryPurple
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Each method row
+            allEstimations.forEach { est ->
+                HealthMethodRow(est)
+                if (est != allEstimations.last()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+
+            // Summary
+            if (validEstimations.size >= 2) {
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = Surface3)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    SummaryItem("均值", avgValue, BatteryBlue)
+                    SummaryItem("中位数", medianValue, BatteryGreen)
+                    SummaryItem("最高", validEstimations.maxOf { it.value }, BatteryGreen)
+                    SummaryItem("最低", validEstimations.minOf { it.value }, BatteryYellow)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HealthMethodRow(est: HealthEstimation) {
+    val valueColor = when {
+        est.value < 0 -> OnSurfaceVariant
+        est.value >= 80 -> BatteryGreen
+        est.value >= 60 -> BatteryYellow
+        else -> BatteryRed
+    }
+
+    val reliabilityIcon = when (est.reliability) {
+        1 -> "●"
+        2 -> "○"
+        else -> "◎"
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = reliabilityIcon,
+                fontSize = 10.sp,
+                color = when (est.reliability) {
+                    1 -> BatteryGreen
+                    2 -> BatteryYellow
+                    else -> OnSurfaceVariant
+                }
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = est.label,
+                fontSize = 13.sp,
+                color = if (est.value > 0) OnSurface else OnSurfaceVariant
+            )
+        }
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (est.capacity > 0) {
+                Text(
+                    text = "${est.capacity}mAh",
+                    fontSize = 11.sp,
+                    color = OnSurfaceVariant,
+                    modifier = Modifier.padding(end = 8.dp)
+                )
+            }
+            Text(
+                text = if (est.value > 0) "${est.value}%" else "--",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = valueColor
+            )
+        }
+    }
+}
+
+@Composable
+fun SummaryItem(label: String, value: Int?, color: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            color = OnSurfaceVariant
+        )
+        Text(
+            text = if (value != null) "${value}%" else "--",
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            color = color
+        )
     }
 }

@@ -82,7 +82,7 @@ class MainActivity : ComponentActivity() {
 fun BatteryApp() {
     val viewModel: BatteryViewModel = viewModel()
     val context = LocalContext.current
-    var currentScreen by remember { mutableStateOf<Screen>(Screen.Home) }
+    var currentScreen by remember { mutableStateOf<Screen>(Screen.Monitor) }
     val homeState by viewModel.homeState.collectAsState()
     val monitorState by viewModel.monitorState.collectAsState()
 
